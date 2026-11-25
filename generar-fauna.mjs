@@ -5,6 +5,7 @@ const CATEGORIAS = ["teros", "colibries", "campo", "aves", "marinos"];
 const MARCA = "Fauna";
 const ARCHIVO = "publicar/fauna.xml";
 const DESCRIPCION_GENERICA = "Esculturas sustentables de animales promoviendo";
+const PREORDEN = /pre-?\s?orde[nr]/i;
 
 const NAVEGADOR = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -21,7 +22,9 @@ const entidades = (t) => String(t || "")
   .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
   .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").trim();
 
-const limpiar = (html) => entidades(String(html || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+const limpiar = (html) => entidades(String(html || "")
+  .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
+  .replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
 const pausa = (ms) => new Promise((r) => setTimeout(r, ms));
 const capitalizar = (t) => t.split(" ").map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(" ");
 
@@ -56,6 +59,44 @@ function meta(html, nombre) {
 
 const absoluta = (u) => !u ? "" : u.startsWith("//") ? "https:" + u : u.startsWith("/") ? BASE + u : u;
 
+function bloqueDesde(html, inicio) {
+  const etiqueta = (html.slice(inicio).match(/^<([a-z0-9]+)/i) || [])[1];
+  if (!etiqueta) return "";
+  const re = new RegExp(`<\\/?${etiqueta}\\b[^>]*>`, "gi");
+  re.lastIndex = inicio;
+  let profundidad = 0, m;
+  while ((m = re.exec(html))) {
+    if (m[0][1] === "/") {
+      profundidad--;
+      if (profundidad === 0) return html.slice(inicio, m.index);
+    } else if (!m[0].endsWith("/>")) {
+      profundidad++;
+    }
+  }
+  return "";
+}
+
+function descripcionCompleta(html, resumen) {
+  const candidatos = [];
+  for (const [, contenido] of html.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const datos = JSON.parse(contenido);
+      const todos = [datos, ...(Array.isArray(datos) ? datos : []), ...(datos["@graph"] || [])];
+      const producto = todos.find((o) => o && o["@type"] === "Product");
+      if (producto?.description) candidatos.push(limpiar(producto.description));
+    } catch {}
+  }
+  for (const m of html.matchAll(/<([a-z0-9]+)\b[^>]*(?:class|id)=["'][^"']*descrip[^"']*["'][^>]*>/gi)) {
+    candidatos.push(limpiar(bloqueDesde(html, m.index)));
+  }
+  const prefijo = limpiar(resumen).slice(0, 30).toLowerCase();
+  const validos = candidatos
+    .filter((t) => t && t.length < 8000)
+    .filter((t) => !prefijo || t.toLowerCase().includes(prefijo))
+    .sort((a, b) => b.length - a.length);
+  return validos[0] || "";
+}
+
 try {
   const productos = new Map();
 
@@ -74,11 +115,12 @@ try {
         if (productos.has(url)) continue;
         const texto = limpiar(interior);
         const precio = [...texto.matchAll(/(USD|U\$S|\$)\s*([\d.,]+)/g)].pop();
-        const estado = /pre-?orden/i.test(texto) ? "preorder"
-          : /out of stock|sin stock|agotado/i.test(texto) ? "out_of_stock" : "in_stock";
+        const preorden = PREORDEN.test(texto);
+        const agotado = /out of stock|sin stock|agotado/i.test(texto);
         const img = (interior.match(/<img[^>]+(?:data-src|src)=["']([^"']+)["']/i) || [])[1] || "";
         productos.set(url, {
-          url, categoria: capitalizar(cat), estado,
+          url, categoria: capitalizar(cat), preorden,
+          enStock: !agotado,
           precio: precio ? numero(precio[2]) : 0,
           moneda: precio ? (precio[1] === "$" ? "UYU" : "USD") : "",
           imagen: absoluta(img),
@@ -93,7 +135,7 @@ try {
   console.log(`  ${productos.size} productos distintos encontrados en las categorias`);
   if (productos.size === 0) throw new Error("No se encontraron productos en las categorias");
 
-  let sinPrecio = 0, sinPagina = 0, guardados = 0;
+  let sinPrecio = 0, sinPagina = 0, guardados = 0, completas = 0, resumidas = 0, enPreorden = 0;
   const titulos = {};
   const ejemplos = [];
   let xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -112,15 +154,24 @@ try {
 
     const slug = p.url.split("/p/")[1]?.split("/")[0] || "";
     let titulo = html ? meta(html, "og:title").replace(/\s*-\s*Fauna\s*-\s*Tienda Online\s*$/i, "").trim() : "";
-    if (!titulo || /Tienda Online/i.test(titulo)) titulo = capitalizar(slug.replace(/-+/g, " ").trim()).toUpperCase();
+    if (!titulo || /Tienda Online/i.test(titulo)) titulo = slug.replace(/-+/g, " ").trim().toUpperCase();
 
     let imagen = html ? absoluta(meta(html, "og:image")) : "";
     if (!imagen || /metaLogo/i.test(imagen)) imagen = p.imagen;
 
-    let descripcion = html ? (meta(html, "og:description") || meta(html, "description")) : "";
-    if (descripcion.startsWith(DESCRIPCION_GENERICA)) descripcion = "";
-    descripcion = (descripcion || `${titulo}. Escultura de la categoria ${p.categoria}.`).slice(0, 600);
-    if (p.estado === "preorder") descripcion += " Producto disponible en pre-orden.";
+    let resumen = html ? (meta(html, "og:description") || meta(html, "description")) : "";
+    if (resumen.startsWith(DESCRIPCION_GENERICA)) resumen = "";
+    let descripcion = html ? descripcionCompleta(html, resumen) : "";
+    if (descripcion) {
+      completas++;
+    } else {
+      descripcion = resumen || `${titulo}. Escultura de la categoria ${p.categoria}.`;
+      resumidas++;
+      console.log(`  Descripcion completa no encontrada (se usa el resumen): ${p.url}`);
+    }
+    if (p.preorden) enPreorden++;
+    }
+    descripcion = descripcion.slice(0, 3000);
 
     titulos[titulo] = (titulos[titulo] || 0) + 1;
 
@@ -130,7 +181,8 @@ try {
       <g:description>${esc(descripcion)}</g:description>
       <g:link>${esc(p.url)}</g:link>
       <g:image_link>${esc(imagen)}</g:image_link>
-      <g:availability>${p.estado}</g:availability>
+      <g:availability>${p.enStock ? "in_stock" : "out_of_stock"}</g:availability>
+      <g:preorder>${p.preorden ? "si" : "no"}</g:preorder>
       <g:price>${p.precio.toFixed(2)} ${p.moneda}</g:price>
       <g:brand>${MARCA}</g:brand>
       <g:product_type>${esc(p.categoria)}</g:product_type>
@@ -138,12 +190,14 @@ try {
       <g:identifier_exists>no</g:identifier_exists>
     </item>\n`;
     guardados++;
-    if (ejemplos.length < 3) ejemplos.push(`${titulo} | ${p.moneda} ${p.precio} | ${p.estado} | ${p.url}`);
+    if (ejemplos.length < 3) ejemplos.push(`${titulo} | ${p.moneda} ${p.precio} | preorder: ${p.preorden ? "si" : "no"} | descripcion: ${descripcion.length} caracteres`);
   }
   xml += `  </channel>\n</rss>\n`;
 
   const repetidos = Object.entries(titulos).filter(([, n]) => n > 1);
   console.log(`  Sin precio (no se publican): ${sinPrecio} | Paginas de producto no leidas: ${sinPagina}`);
+  console.log(`  Descripciones completas: ${completas} | Solo resumen: ${resumidas}`);
+  console.log(`  Productos en pre-order: ${enPreorden}`);
   console.log(`  Nombres repetidos: ${repetidos.map(([t, n]) => `${t} (x${n})`).join(", ") || "ninguno"}`);
   console.log("  Ejemplos para revisar:");
   ejemplos.forEach((e) => console.log(`    ${e}`));
