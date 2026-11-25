@@ -170,7 +170,6 @@ try {
       console.log(`  Descripcion completa no encontrada (se usa el resumen): ${p.url}`);
     }
     if (p.preorden) enPreorden++;
-    }
     descripcion = descripcion.slice(0, 3000);
 
     titulos[titulo] = (titulos[titulo] || 0) + 1;
