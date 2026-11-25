@@ -1,0 +1,48 @@
+name: Actualizar feed Fauna
+
+on:
+  schedule:
+    - cron: "52 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node generar-fauna.mjs
+      - if: hashFiles('publicar/fauna.xml') != ''
+        uses: actions/configure-pages@v5
+      - if: hashFiles('publicar/fauna.xml') != ''
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: publicar
+      - name: Esperar a que el archivo este disponible
+        if: hashFiles('publicar/fauna.xml') != ''
+        run: sleep 20
+      - if: hashFiles('publicar/fauna.xml') != ''
+        id: deployment
+        uses: actions/deploy-pages@v4
+        continue-on-error: true
+      - name: Esperar antes de reintentar
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 60
+      - name: Reintentar publicacion
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v4
